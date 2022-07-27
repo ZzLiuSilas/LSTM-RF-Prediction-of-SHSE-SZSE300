@@ -1,0 +1,139 @@
+---
+title: "SVR"
+author: "ZzLiu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    theme: cosmo
+    self_contained: TRUE
+    toc: TRUE
+    number_sections: TRUE
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+```{r}
+library(tidyverse)
+library(psych)
+library(e1071)
+library(caTools)
+setwd("C:\\Users\\Silas Liew\\Documents\\商业大数据分析\\Project4")
+```
+#读入数据
+```{r}
+data = readxl::read_xlsx("Proj4_data.xlsx")
+result_lstm = read_csv("Proj4_Result_LSTM.csv") %>% 
+  select("0")
+colnames(result_lstm) = "result_lstm"
+truth_lstm = read_csv("Proj4_Truth_LSTM.csv") %>% 
+  select("0")
+colnames(truth_lstm) = "truth_lstm"
+date = data[["date"]]
+data_scaled = read_csv("Proj4_data_scaled.csv")
+data_SVR = slice(data_scaled, 2433:3001)
+data_SVR = tibble("date" = date[2433:3001], data_SVR, result_lstm)
+```
+```{r}
+summary(data_SVR)
+```
+
+#计算残差
+```{r}
+data_SVR = data_SVR %>% 
+  mutate(diff = close - result_lstm) 
+data_SVR$diff = lead(data_SVR$diff)
+data_train = data_SVR %>% 
+  slice(1:400)
+data_test = data_SVR %>% 
+  slice(401:568)
+```
+
+#建立SVR模型(y为下一日残差/损失，xi为当日特征指标)
+```{r}
+set.seed(0)
+tune.out = tune(method = svm,
+                diff ~ ret + turnrate + ADTM + ATR + CCI + MACD + MTM + ROC + SOBV+ STD_26 + STD_5,
+                data = data_train,
+                scale = F,
+                ranges = list(kernel = c("polynomial"),
+                               cost = seq(1, 10, 0.1), 
+                               gamma = seq(1, 10, 0.1)))
+svrmodel = tune.out$best.model
+summary(svrmodel)
+prediction <- numeric(nrow(data_test))
+```
+
+```{r}
+library(randomForest)
+set.seed(0)
+forestmodel <- randomForest(diff ~ ret + turnrate + ADTM + ATR + CCI + MACD + MTM + ROC + SOBV+ STD_26 + STD_5, 
+                            data_train, 
+                            ntree = 1000, 
+                            mtry = 3, 
+                            nodesize = 25)
+```
+
+```{r}
+predictForest <- numeric(nrow(data_test))
+for(i in 1:168){
+  predictForest[i] <- predict(forestmodel, type = "response", newdata = data_test[i,])
+  data_train <- bind_rows(data_train, data_test[i,])
+  forestmodel <- randomForest(diff ~ ret + turnrate + ADTM + ATR + CCI + MACD + MTM + ROC + SOBV+ STD_26 + STD_5, 
+                            data_train, 
+                            ntree = 1000, 
+                            mtry = 3, 
+                            nodesize = 25)
+}
+```
+
+```{r}
+svrmodel <- svm(diff ~ ret + turnrate + ADTM + ATR + CCI + MACD + MTM + ROC + SOBV+ STD_26 + STD_5, 
+      data = data_train, 
+      kernel = "polynomial", 
+                gamma = 3.3,
+                cost = 1)
+for(i in 1:168){
+  prediction[i] <- predict(svrmodel, type = "response", newdata = data_test[i,])
+  datatrain <- bind_rows(data_train, data_test[i,])
+  svrmodel <- svm(diff ~ ret + turnrate + ADTM + ATR + CCI + MACD + MTM + ROC + SOBV+ STD_26 + STD_5, 
+      data = data_train, 
+      kernel = "polynomial", 
+                gamma = 3.3,
+                cost = 1)
+}
+```
+
+#反向加回，绘图
+```{r}
+data_test = data_test %>% 
+  mutate(result_lstm_svr = result_lstm + lag(prediction))
+data_test %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = result_lstm_svr), color = "red") +
+  geom_line(aes(x = date, y = close), color = "blue") +
+  theme_bw() + 
+  labs(x = "Red: Prediction; Blue: Truth", y = "Fit", title = "LSTM-SVR Prediction")
+ggsave("LSTM-SVR Prediction.png", height = 5, width = 7.5)
+```
+
+```{r}
+data_test = data_test %>% 
+  mutate(result_lstm_forest = result_lstm + lag(predictForest))
+data_test %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = result_lstm_forest), color = "red") +
+  geom_line(aes(x = date, y = close), color = "blue") +
+  theme_bw() + 
+  labs(x = "Red: Prediction; Blue: Truth", y = "Fit", title = "LSTM-RF Prediction")
+ggsave("LSTM-RF Prediction.png", height = 5, width = 7.5)
+```
+
+```{r}
+attach(data_test)
+mse_lstm = mean((close - data_test$result_lstm)^2, na.rm = T)
+mse_rf = mean((close - predictForest)^2, na.rm = T)
+mse_lstm_rf = mean((close - result_lstm_forest)^2, na.rm = T)
+mse_lstm
+mse_rf
+mse_lstm_rf
+```
